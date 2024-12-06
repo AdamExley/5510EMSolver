@@ -1,2 +1,5 @@
 scipy
 engineering_notation
+matplotlib
+numpy
+tqdm
