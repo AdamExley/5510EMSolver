@@ -493,6 +493,8 @@ class Solver():
                 phi_vec = solve(Q, q_vec)
                 v_vecs[0] = (phi_vec / np.linalg.norm(phi_vec))
 
+                residuals = []
+
 
                 for m in tqdm(range(NUM_ITS), desc="Lanczos Iteration", leave=False, position=1):
                     
@@ -531,16 +533,12 @@ class Solver():
 
                     res_vec = omega_vec
 
-                    # Orthogonalize against all previous vectors
-                    # Seems to be optional, doesn't seem to affect convergence with the input's I've tried
-                    for i in range(m):
-                        res_vec -= (v_vecs[i].T @ res_vec) * v_vecs[i]
-
                     res_vec = res_vec / np.linalg.norm(res_vec)
                     v_vecs[m+1] = res_vec
     
                     # Check residual norm for convergence
                     residual = np.linalg.norm(residual)
+                    residuals.append(residual)
                     logging.debug(f"Residual: {residual}")
 
                     if m == NUM_ITS - 1 or (residual < 1e-10 and m > 0):
@@ -548,8 +546,7 @@ class Solver():
                         dom_eigval = np.real(dom_eigval)
                         converged_eigenvalues.append(dom_eigval)
 
-                        # Calculate the Ritz Vector associateed with the eigenvalue
-                        # eigenvector = P - dom_eigval * Q
+                        # Calculate the Ritz Vector associated with the eigenvalue
                         boi = P - dom_eigval * Q
                         U, S, Vt = np.linalg.svd(boi)
                     
