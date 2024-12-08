@@ -1,28 +1,29 @@
-import re
-import numpy as np
+import re   # REGEX for parsing input files
 
 from typing import List, Tuple, Union
 import logging
-import scipy.linalg as la
 
-from engineering_notation import EngNumber
-from functools import lru_cache
-
+# Math Backend
 import numpy as np
+import scipy.linalg as la
 from scipy.linalg import solve
-import matplotlib.pyplot as plt
 
-from tqdm import tqdm
+from functools import lru_cache # Slight speedup for barycentric coordinates
 
-logging.basicConfig(level=logging.INFO)
+# Data display
+from engineering_notation import EngNumber # Engineering notation for numbers
+from tqdm import tqdm   # Progress bar
+import matplotlib.pyplot as plt # Plotting
+
 
 ######################################################## Config ########################################################
 
+logging.basicConfig(level=logging.INFO)
+
 DEFAULT_NUM_SOLUTIONS = 2
-
 FILE_EXTENSION = '.in'
-
 DEBUG_PRE_ELEMATS = False
+MAX_NUM_LANCZOS_ITS = 250
 
 
 ######################################################## Regular Expressions ########################################################
@@ -50,10 +51,11 @@ D2 = np.array([[ 1, -1,  0], [-1, 1,  0], [ 0, 0, 0]])
 
 E0 = np.ones((3, 3)) + np.eye(3)
 
-############################################################# Classes #############################################################
+############################################################# Backend Classes #############################################################
 
 
 class Edge():
+    """Represents a connection between two points in the mesh"""
     def __init__(self, idx_from: int, idx_to: int):
         self.idx_from = idx_from
         self.idx_to = idx_to
@@ -68,13 +70,15 @@ class Edge():
         return Edge(self.idx_to, self.idx_from)
     
     def apply_coords(self, coords: np.ndarray):
+        """Populate fields that require coordinates, given a coordinate set"""
         self.coords = np.array([coords[self.idx_from], coords[self.idx_to]])
         self.vector = self.coords[1] - self.coords[0]
     
 
 class EdgeSet():
+    """Collection of all edges in a mesh"""
     def __init__(self, edges: List[Edge] = []):
-        self.edges = edges
+        self.edges: List[Edge] = edges
 
     def __len__(self) -> int:
         return len(self.edges)
@@ -89,6 +93,14 @@ class EdgeSet():
         return edge in self.edges or -edge in self.edges
 
     def check(self, edge: Edge) -> Tuple[int, int]:
+        """Check if an edge is in the set, returning the index and sign if it is
+
+        Returns
+        -------
+        Tuple[int, int]
+            index, sign (either 1 or -1)
+            None, None if the edge is not in the set
+        """
         # Return index, sign of the edge
         if edge in self.edges:
             return self.edges.index(edge), 1
@@ -98,12 +110,7 @@ class EdgeSet():
             return None, None
 
     def add(self, edge: Edge) -> Tuple[int, int]:
-        """
-        Parameters
-        ----------
-        edge : Edge
-            Edge to add
-
+        """Add an edge to the set
         Returns
         -------
         tuple[int, int]
@@ -124,10 +131,12 @@ class EdgeSet():
         return set([edge.idx_from for edge in self.edges] + [edge.idx_to for edge in self.edges])
     
     def apply_coords(self, coords: np.ndarray):
+        """Apply coordinates to all edges in the set"""
         for edge in self.edges:
             edge.apply_coords(coords)
     
     def remove(self, edge: Edge) -> None:
+        """Remove an edge from the set"""
         if edge in self.edges:
             self.edges.remove(edge)
         elif -edge in self.edges:
@@ -136,12 +145,16 @@ class EdgeSet():
 
 
 class UnknownSet():
+    """A collection of edges and points that are unknown in the mesh
+    
+    Edges are stored first, followed by points
+    """
     def __init__(self, edge_set: EdgeSet, point_set: List[int]):
-        self.edge_start_idx = 0
-        self.point_start_idx = len(edge_set)
+        self.edge_start_idx:int = 0
+        self.point_start_idx:int = len(edge_set)
 
-        self.edge_set = edge_set
-        self.point_set = point_set
+        self.edge_set: EdgeSet = edge_set
+        self.point_set: List[int] = point_set
 
     def __len__(self) -> int:
         return len(self.edge_set) + len(self.point_set)
@@ -158,7 +171,20 @@ class UnknownSet():
         else:
             return item in self.point_set
         
+
     def index_sign(self, item: Union[Edge, int]) -> int:
+        """Get and index and sign of an item in the set
+        
+        Sign only really matters for edges, so points will always return 1
+
+        Returns
+        -------
+        Tuple[int, int]
+            (Index, sign) for edges
+            (Index, 1) for points
+            (None, 0) if the item is not in the set
+
+        """
         if item not in self:
             return None, 0
         elif isinstance(item, Edge):
@@ -169,7 +195,8 @@ class UnknownSet():
             else:
                 return None, 0
             
-    def printToFile(self, filename):
+    def printToFile(self, filename:str) -> None:
+        """Print the unknown set to a file for reference when comparing to hand results, etc"""
         with open(filename, 'w') as file:
             for i in range(len(self)):
                 if isinstance(self[i], Edge):
@@ -181,10 +208,11 @@ class UnknownSet():
 
 
 class Triangle():
-    def __init__(self, a, b, c, eps=1.0):
+    """Represents a triangle in the mesh"""
+    def __init__(self, a:int, b:int, c:int, eps=1.0):
         self.pts = [a, b, c]
-        self.eps = eps
-        self.mu = 1
+        self.eps: float = eps
+        self.mu: float = 1
 
         # Create edges
         self.edges = [
@@ -200,6 +228,8 @@ class Triangle():
 
     @staticmethod
     def from_string(string) -> List['Triangle']:
+        """Create a list of triangles from a string that is then REGEX parsed"""
+
         # Create a list of all triangle matches
         tri_iter = re.finditer(TRIANGLE_REGEX, string)
         
@@ -218,6 +248,7 @@ class Triangle():
     
     @staticmethod
     def uniqueEdges(triangles: 'List[Triangle]') -> EdgeSet:
+        """Get a set of all unique edges from a list of triangles"""
         edges = EdgeSet()
         for triangle in triangles:
             for edge in triangle.edges:
@@ -227,7 +258,8 @@ class Triangle():
     def __repr__(self):
         return f'Triangle({self.pts[0]}, {self.pts[1]}, {self.pts[2]}) eps_r = {self.eps}'
     
-    def apply_coords(self, point_coords):
+    def apply_coords(self, point_coords: np.ndarray) -> None:
+        """Apply coordinates to the triangle and perform precomputations that rely only on the coordinates"""
         logging.debug(f"Applying coordinates to triangle: {self}")
         self.coords = [point_coords[pt] for pt in self.pts]
 
@@ -251,7 +283,7 @@ class Triangle():
 
         logging.debug(f"Inward Normals: {self.d_zeta}")
 
-        # Compute cotangent of each angle
+        # Fin lil aliases bc I'm lazy
         p0 = self.coords[0]
         p1 = self.coords[1]
         p2 = self.coords[2]
@@ -264,7 +296,7 @@ class Triangle():
         self.cots = [cot_0, cot_1, cot_2]
         logging.debug(f"Cotangents: {self.cots}")
 
-        # Precompute some element matrices
+        # Precompute some element matrix values that don't depend on the wavenumber
         self._elemat_preA = (1 / self.area) * A0
         self._elemat_preB = (1 / 12) * (self.cots[0] * Q0 + self.cots[1] * Q1 + self.cots[2] * Q2)
         self._elemat_preC = (1 / 6 ) * (self.cots[0] * G0 + self.cots[1] * G1 + self.cots[2] * G2)
@@ -283,12 +315,13 @@ class Triangle():
 
 
 
-    def compute_element_matrices(self, k_sq) -> None:
+    def compute_element_matrices(self, k_sq:float) -> None:
         """Compute the element matrices for the triangle
 
         Parameters
         ----------
-        k_sq : Free Space Wavenumber (Squared)
+        k_sq : float
+            Free Space Wavenumber (Squared)
         """
 
         # Add in scaling factors
@@ -329,6 +362,12 @@ class Triangle():
         -------
         np.ndarray
             Barycentric coordinates
+
+        Note
+        ----
+        Uses a cache to speed up computation
+        Therefore input is a Tuple (hashable) instead of a numpy array
+
         """
         bary_point = np.zeros(3)
 
@@ -346,6 +385,7 @@ class Triangle():
         return bary_point
     
     def barycentric(self, point: np.ndarray) -> np.ndarray:
+        """See _barycentric, just a wrapper for numpy arrays"""
         return self._barycentric(tuple(point.tolist()))
 
     
@@ -368,7 +408,8 @@ class Triangle():
 
         return u >= 0 and v >= 0 and w >= 0 and max(u, v, w) <= 1 and not mag_too_big
     
-    def edge_interp(self, barycentric_point):
+    def edge_interp(self, barycentric_point:np.ndarray) -> np.ndarray:
+        """Get the edge-interpolatory basis for computing fields"""
         basis_out = np.zeros((3, 2))
         zeta = barycentric_point
 
@@ -378,7 +419,6 @@ class Triangle():
         return basis_out
     
 
-    
     def print_element_matrices(self):
         if self.ele_mtxs is None:
             print('Element matrices not yet computed')
@@ -395,7 +435,7 @@ class Triangle():
 
 
 
-############################################################# Functions #############################################################
+############################################################# Generic Functions #############################################################
 
 
 
@@ -425,6 +465,60 @@ def parse_file(filename):
 
     return pts, triangles, pec_edges
 
+
+
+
+
+
+def resample(points: np.ndarray, triangles : List[Triangle], pec_edges):
+    
+    logging.info(f"(RESAMPLING) Input {len(points)} points, {len(triangles)} triangles")
+    new_triangles = []
+
+    for tri in triangles:
+        # Apply coordinates to the triangle
+        tri.apply_coords(points)
+
+        # Find the longest edge of the triangle
+        longest_edge_idx = np.argmax([np.linalg.norm(x.vector) for x in tri.edges])
+
+        longest_edge : Edge = tri.edges[longest_edge_idx]
+        is_pec = longest_edge in pec_edges
+
+        # Get a point that bisects the longest edge
+        new_point = (points[longest_edge.idx_from] + points[longest_edge.idx_to]) / 2
+
+        # Check if the new point already exists
+        new_idx = None
+        for i, point in enumerate(points):
+            if np.allclose(point, new_point):
+                new_idx = i
+                break
+
+        # If the point doesn't exist, add it
+        if new_idx is None:
+            points = np.vstack([points, new_point])
+            new_idx = len(points) - 1
+
+        # Create new triangles, making sure to obey right hand wrapping order
+        new_triangles.append(Triangle(tri.pts[longest_edge_idx], tri.pts[(longest_edge_idx + 1) % 3], new_idx, tri.eps))
+        new_triangles.append(Triangle(tri.pts[longest_edge_idx], new_idx, tri.pts[(longest_edge_idx + 2) % 3], tri.eps))
+
+        # Modify PEC edges
+        if is_pec:
+            pec_edges.remove(longest_edge)
+            pec_edges.add(Edge(longest_edge.idx_from, new_idx))
+            pec_edges.add(Edge(new_idx, longest_edge.idx_to))
+        
+    logging.info(f"(RESAMPLING) Output {len(points)} points, {len(new_triangles)} triangles")
+    
+    return points, new_triangles, pec_edges
+
+    
+
+
+
+############################################################# Solver #############################################################
 
 
 class Solver():
@@ -460,13 +554,21 @@ class Solver():
 
 
 
-
     def modified_lanczos(self, P : np.ndarray, Q : np.ndarray, num_eigenvalues : int) -> Tuple[np.ndarray, np.ndarray]:
+        """Perform the modified Lanczos algorithm to find the dominant eigenvalues and eigenvectors of the matrix pair (P, Q)
 
-        NUM_ITS = 250
+        Solves the generalized eigenvalue problem P @ phi = lambda * Q @ phi
 
+        Parameters
+        ----------
+        num_eigenvalues : int
+            Number of eigenvalues to attempt to find
 
-        
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            eigenvalues, eigenvectors
+        """        
         converged_eigenvectors = []
         converged_eigenvalues = []
 
@@ -484,8 +586,8 @@ class Solver():
                     q_vec -= (vec @ q_vec) * vec
 
                 # Create a matrix for the vectors
-                v_vecs = np.zeros((NUM_ITS+1, self.num_unknowns))
-                H_mat = np.zeros((NUM_ITS+1, NUM_ITS+1))
+                v_vecs = np.zeros((MAX_NUM_LANCZOS_ITS+1, self.num_unknowns))
+                H_mat = np.zeros((MAX_NUM_LANCZOS_ITS+1, MAX_NUM_LANCZOS_ITS+1))
 
 
                 # Solve Q @ phi_vec = q_vec for phi_vec
@@ -496,7 +598,7 @@ class Solver():
                 residuals = []
 
 
-                for m in tqdm(range(NUM_ITS), desc="Lanczos Iteration", leave=False, position=1):
+                for m in tqdm(range(MAX_NUM_LANCZOS_ITS), desc="Lanczos Iteration", leave=False, position=1):
                     
                     # Compute H_{m,m}
                     num = v_vecs[m].T @ P @ v_vecs[m]
@@ -541,7 +643,7 @@ class Solver():
                     residuals.append(residual)
                     logging.debug(f"Residual: {residual}")
 
-                    if m == NUM_ITS - 1 or (residual < 1e-10 and m > 0):
+                    if m == MAX_NUM_LANCZOS_ITS - 1 or (residual < 1e-10 and m > 0):
 
                         dom_eigval = np.real(dom_eigval)
                         converged_eigenvalues.append(dom_eigval)
@@ -564,8 +666,6 @@ class Solver():
                 
             
             
-
-
 
 
     def solve(self, freq : float, n_solutions : int = DEFAULT_NUM_SOLUTIONS) -> Tuple[np.ndarray, np.ndarray]:
@@ -672,7 +772,7 @@ class Solver():
 
 
 
-
+############################################################# Frontend Classes for Running Solver #############################################################
 
 class ProfileProgram():
     """
@@ -871,58 +971,7 @@ class ModeProgram():
         # plt.semilogx(freqs, np.pi * freqs, 'k--', label='TEM Propagation')
         plt.show()
 
-
-
         return betas, eigvecs
-
-
-
-
-def resample(points: np.ndarray, triangles : List[Triangle], pec_edges):
-    
-    logging.info(f"(RESAMPLING) Input {len(points)} points, {len(triangles)} triangles")
-    new_triangles = []
-
-    for tri in triangles:
-        # Apply coordinates to the triangle
-        tri.apply_coords(points)
-
-        # Find the longest edge of the triangle
-        longest_edge_idx = np.argmax([np.linalg.norm(x.vector) for x in tri.edges])
-
-        longest_edge : Edge = tri.edges[longest_edge_idx]
-        is_pec = longest_edge in pec_edges
-
-        # Get a point that bisects the longest edge
-        new_point = (points[longest_edge.idx_from] + points[longest_edge.idx_to]) / 2
-
-        # Check if the new point already exists
-        new_idx = None
-        for i, point in enumerate(points):
-            if np.allclose(point, new_point):
-                new_idx = i
-                break
-
-        # If the point doesn't exist, add it
-        if new_idx is None:
-            points = np.vstack([points, new_point])
-            new_idx = len(points) - 1
-
-        # Create new triangles, making sure to obey right hand wrapping order
-        new_triangles.append(Triangle(tri.pts[longest_edge_idx], tri.pts[(longest_edge_idx + 1) % 3], new_idx, tri.eps))
-        new_triangles.append(Triangle(tri.pts[longest_edge_idx], new_idx, tri.pts[(longest_edge_idx + 2) % 3], tri.eps))
-
-        # Modify PEC edges
-        if is_pec:
-            pec_edges.remove(longest_edge)
-            pec_edges.add(Edge(longest_edge.idx_from, new_idx))
-            pec_edges.add(Edge(new_idx, longest_edge.idx_to))
-        
-    logging.info(f"(RESAMPLING) Output {len(points)} points, {len(new_triangles)} triangles")
-    
-    return points, new_triangles, pec_edges
-
-    
 
 
 
