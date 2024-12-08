@@ -14,31 +14,21 @@ import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 
-
 logging.basicConfig(level=logging.INFO)
-
-
 
 ######################################################## Config ########################################################
 
 DEFAULT_NUM_SOLUTIONS = 2
-NUM_RESAMPLES = 5
-FREQ = 1e9
-GRID_SIZE = 50
 
+FILE_EXTENSION = '.in'
 
 DEBUG_PRE_ELEMATS = False
-
 
 
 ######################################################## Regular Expressions ########################################################
 TRIANGLE_REGEX = r'(?P<index>\d+\s*):\s*\(\s*(?P<a>\d+)\s*,\s*(?P<b>\d+)\s*,\s*(?P<c>\d+)\s*\)\s*(\s*\((?P<eps>[+-]?([0-9]*[.])?[0-9]+)\)\s*)?'
 POINT_REGEX = r"(?P<index>\d+\s*):\s*\(\s*(?P<x>[+-]?([0-9]*[.])?[0-9]+)\s*,\s*(?P<y>[+-]?([0-9]*[.])?[0-9]+)\s*\)"
 PEC_REGEX = r'Edge\((\d+),(\d+)\)'
-
-
-
-
 ############################################################# Constants #############################################################
 
 MU_0 = 4 * np.pi * 10**-7
@@ -471,13 +461,11 @@ class Solver():
 
 
 
-    def modified_lanczos(self, P, Q, num_eigenvalues):
+    def modified_lanczos(self, P : np.ndarray, Q : np.ndarray, num_eigenvalues : int) -> Tuple[np.ndarray, np.ndarray]:
 
         NUM_ITS = 250
 
-        # Create a matrix for the vectors
-        v_vecs = np.zeros((NUM_ITS+1, self.num_unknowns))
-        H_mat = np.zeros((NUM_ITS+1, NUM_ITS+1))
+
         
         converged_eigenvectors = []
         converged_eigenvalues = []
@@ -495,27 +483,25 @@ class Solver():
                 for vec in converged_eigenvectors:
                     q_vec -= (vec @ q_vec) * vec
 
-                m = 0
-                # print(q_vec)
+                # Create a matrix for the vectors
+                v_vecs = np.zeros((NUM_ITS+1, self.num_unknowns))
+                H_mat = np.zeros((NUM_ITS+1, NUM_ITS+1))
 
 
                 # Solve Q @ phi_vec = q_vec for phi_vec
+                # This is the first vector in the Lanczos iteration
                 phi_vec = solve(Q, q_vec)
-
                 v_vecs[0] = (phi_vec / np.linalg.norm(phi_vec))
-
-                # print(v_vecs[0])
-
-                residuals = []
-                
 
 
                 for m in tqdm(range(NUM_ITS), desc="Lanczos Iteration", leave=False, position=1):
                     
+                    # Compute H_{m,m}
                     num = v_vecs[m].T @ P @ v_vecs[m]
                     den = v_vecs[m].T @ Q @ v_vecs[m]
                     H_mat[m, m] = num / den
                     
+                    # Compute H_{m-1,m}
                     if m != 0:
                         num = v_vecs[m-1].T @ P @ v_vecs[m]
                         den = v_vecs[m-1].T @ Q @ v_vecs[m-1]
@@ -540,25 +526,18 @@ class Solver():
                     dom_eigval = eigvals[dom_idx]
                     dom_eigvec = eigvecs[:, dom_idx]
 
-
-
                     # Compute residual
                     residual = dom_eigval * np.abs(dom_eigvec) - H_mat[:m+2, :m+2] @ dom_eigvec
 
-
                     res_vec = omega_vec
 
-                    # for i in range(m):
-                    #     res_vec -= (v_vecs[i].T @ res_vec) * v_vecs[i]
+                    # Orthogonalize against all previous vectors
+                    # Seems to be optional, doesn't seem to affect convergence with the input's I've tried
+                    for i in range(m):
+                        res_vec -= (v_vecs[i].T @ res_vec) * v_vecs[i]
 
                     res_vec = res_vec / np.linalg.norm(res_vec)
                     v_vecs[m+1] = res_vec
-
-
-
-                    # v_vecs[m+1] = omega_vec / np.linalg.norm(omega_vec)
-                    # v_vecs[m+1] = v_vecs[m] - dom_eigval * omega_vec
-
     
                     # Check residual norm for convergence
                     residual = np.linalg.norm(residual)
@@ -630,7 +609,6 @@ class Solver():
                     if idx is None or jdx is None:
                         continue
                     A_mat[idx, jdx] += sign_i * sign_j * tri.ele_mtxs[0][i,j]
-                    # logging.debug(f"Adding {sign_i * sign_j * tri.ele_mtxs[0][i,j]} to A_mat[{idx},{jdx}]")
 
             # Add the B matrix
             for i, (idx, sign_i) in enumerate(edge_mapping):
@@ -638,7 +616,6 @@ class Solver():
                     if idx is None or jdx is None:
                         continue
                     BCD_mat[idx, jdx] += sign_i * sign_j * tri.ele_mtxs[1][i,j]
-                    # logging.debug(f"Adding {sign_i * sign_j * tri.ele_mtxs[1][i,j]} to BCD_mat[{idx},{jdx}]")
 
             # Add the C and C^T matrices
             for i, (idx, sign) in enumerate(edge_mapping):
@@ -646,11 +623,9 @@ class Solver():
                     if idx is None or jdx is None:
                         continue
 
-                    # # idx is the edge, jdx is the point
+                    # idx is the edge, jdx is the point
                     BCD_mat[jdx, idx] += sign * tri.ele_mtxs[2][i,j]
                     BCD_mat[idx, jdx] += sign * tri.ele_mtxs[2][i,j]
-
-                    # logging.debug(f"Adding {sign * tri.ele_mtxs[2][i,j]} to BCD_mat[{idx},{jdx}]")
 
             # Add the D matrix
             for i, (idx) in enumerate(point_mapping):
@@ -658,7 +633,6 @@ class Solver():
                     if idx is None or jdx is None:
                         continue
                     BCD_mat[idx, jdx] += tri.ele_mtxs[3][i,j]
-                    # logging.debug(f"Adding {tri.ele_mtxs[3][i,j]} to BCD_mat[{idx},{jdx}]")
 
 
         # Suppression of degenerate solutions
@@ -668,45 +642,45 @@ class Solver():
         logging.info(f"Theta bound^2 = {theta_bound} sqrt=({np.sqrt(theta_bound)})")
 
 
-        # Try to solve problem by suppressing degenerate solutions
-        # try:
 
-        # Modified matricies to solve for
+        # Modified matricies to solve for (suppression of degenerate solutions)
         P_mat = BCD_mat
         Q_mat = BCD_mat + A_mat / theta_bound
 
-
-
-        # self.modified_lanczos(P_mat, Q_mat, n_solutions)
+        # Run the modified Lanczos algorithm
         eigvals, eigvecs = self.modified_lanczos(P_mat, Q_mat, n_solutions)
-        # eigvals, eigvecs = self.modified_lanczos(A_mat, BCD_mat, n_solutions)
-
-
     
-        # print(eigvecs.shape)
-            
-        # print(eigvals)
-        # betas = np.sqrt(theta_bound - theta_bound / eigvals)
+        # Calculate the perported betas
         betas = np.sqrt(theta_bound * (eigvals - 1 ) / eigvals)
-        print(betas)
 
         # Recalculate betas with the original matrix
         for i in range(n_solutions):
             eigvec = eigvecs[:,i]
-            beta = np.sqrt(-eigvec @ A_mat @ eigvec / (eigvec @ BCD_mat @ eigvec))
+            try:
+                beta = np.sqrt(-eigvec @ A_mat @ eigvec / (eigvec @ BCD_mat @ eigvec))
+            except:
+                beta = np.nan
             self.betas = beta
 
+        # Log the results
+        for i in range(n_solutions):
+            if np.isnan(betas[i]) or np.isinf(betas[i]) or betas[i] < 0:
+                continue
+            logging.info(f"Eigenvalue {i:02d}: Propagation Constant: {EngNumber(betas[i])} rad/m")
 
+        # Save to class and return
         self.betas = betas
         self.eigvecs = eigvecs
-
         return betas, eigvecs
 
 
 
 
 
-class Program():
+class ProfileProgram():
+    """
+    Program subclass that handles the data display of a single mode profile at a time
+    """
     def __init__(self, solver : Solver):
         self.solver = solver
         self.is_setup = False
@@ -751,11 +725,11 @@ class Program():
 
         self.is_setup = True
 
-    def run(self, freq : float):
+    def run(self, freq : float, n_solutions : int = DEFAULT_NUM_SOLUTIONS):
         if not self.is_setup:
             self.setup()
 
-        betas, eigvecs = self.solver.solve(freq)
+        betas, eigvecs = self.solver.solve(freq, n_solutions)
         logging.info(f"Solver completed for {EngNumber(freq)}Hz")
 
             
@@ -869,6 +843,44 @@ class Program():
 
 
 
+class ModeProgram():
+    """
+    Program subclass that handles the data display of a single mode profile at a time
+    """
+    def __init__(self, solver : Solver):
+        self.solver = solver
+        self.is_setup = False
+        self.has_run_once = False
+
+
+    def run(self, freqs : np.ndarray, max_sols : int):
+
+        # Allocate matrices
+        betas = np.zeros((len(freqs), max_sols))
+        eigvecs = np.zeros((len(freqs),self.solver.num_unknowns, max_sols))
+
+        for i, freq in enumerate(tqdm(freqs, desc="Frequency Loop", leave=False)):
+            betas[i], eigvecs[i] = self.solver.solve(freq, max_sols)
+
+        # # Post-process the data
+        # for i in range(len(freqs)):
+        #     # Sort the modes by propagation constant
+        #     idxs = np.argsort(betas[i])
+
+        # Plot results
+        plt.figure()
+        plt.loglog(freqs, betas)
+        # Add in a line for TEM propagation
+        # plt.semilogx(freqs, np.pi * freqs, 'k--', label='TEM Propagation')
+        plt.show()
+
+
+
+        return betas, eigvecs
+
+
+
+
 def resample(points: np.ndarray, triangles : List[Triangle], pec_edges):
     
     logging.info(f"(RESAMPLING) Input {len(points)} points, {len(triangles)} triangles")
@@ -923,20 +935,33 @@ def resample(points: np.ndarray, triangles : List[Triangle], pec_edges):
 if __name__ == '__main__':
 
     import argparse as ap
+    import os
 
-    parser = ap.ArgumentParser(description="EM FEM Solver")
-    parser.add_argument('--input',"-i", type=str, help="Input file", default='uStrip.txt')
-    parser.add_argument('--freq',"-f", type=float, help="Frequency to solve at", default=1e9)
-    parser.add_argument('--resamples',"-r", type=int, help="Number of resamples", default=5)
-    parser.add_argument('--grid',"-g", type=int, help="Field display grid size", default=50)
+    # Get all possible input files
+    input_files = [f for f in os.listdir() if f.endswith(FILE_EXTENSION)]
+
+    parser = ap.ArgumentParser()
+    parser.add_argument('--mode',"-m", type=str, default='profile', choices=['profile', 'modes'], \
+        help="Mode to run in. \
+            \n\tprofile: Compute propagation and mode profile at a specific frequency \
+            \n\tmodes: (NOT FULLY WORKING) Compute the propagation constant of the first N_EIGEN modes up to FREQ")
+    parser.add_argument('--input',"-i", type=str, help="Input file", default='uStrip.in', choices=input_files)
+    parser.add_argument('--freq',"-f", type=float, help="Frequency to solve at (Default 1e9)", default=1e9)
+    parser.add_argument('--resamples',"-r", type=int, help="Number of resamples (Default 3)", default=3)
+    parser.add_argument('--grid',"-g", type=int, help="Field display grid size (Default 35)", default=35)
+    parser.add_argument('--n_eigen', "-n", type=int, help="Number of eigenvalues to compute (Default 2)", default=2)
 
 
     args = parser.parse_args()
 
+    # Check that the input file exists
+    if not os.path.exists(args.input):
+        logging.error(f"Input file {args.input} does not exist")
+        exit(1)
+
 
     # Parse the file
     points, triangles, pec_edges = parse_file(args.input)
-    # points, triangles, pec_edges = parse_file('input copy.txt')
     logging.info(f"Parsed {len(points)} points, {len(triangles)} triangles, and {len(pec_edges)} PEC edges")
 
     for i in range(args.resamples):
@@ -945,9 +970,15 @@ if __name__ == '__main__':
 
     solver = Solver(points, triangles, pec_edges)
 
-    p = Program(solver)
-    p.setup(args.grid)
-    p.run(args.freq)
+
+    if args.mode == 'profile':
+        p = ProfileProgram(solver)
+        p.setup(args.grid)
+        p.run(args.freq, args.n_eigen)
+    elif args.mode == 'modes':
+        logging.warning("Mode program is not fully working")
+        p = ModeProgram(solver)
+        p.run(np.logspace(7, np.log10(args.freq), 15), args.n_eigen)
    
 
 
